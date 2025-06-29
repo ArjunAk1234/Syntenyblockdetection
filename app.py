@@ -1,32 +1,18 @@
-from flask import Flask, request, jsonify, send_file
-from werkzeug.utils import secure_filename
+from flask import Flask, request, jsonify
 import os
 import sys
 import json
 import time
 import tempfile
-import shutil
 from typing import List, Tuple, Set, Optional
 import numpy as np
+from io import StringIO
 
 app = Flask(__name__)
 
 # Configuration
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
-app.config['UPLOAD_FOLDER'] = 'uploads'
-app.config['RESULTS_FOLDER'] = 'results'
 
-# Ensure directories exist
-# os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
-# os.makedirs(app.config['RESULTS_FOLDER'], exist_ok=True)
-
-# Get the absolute path of the current directory
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-
-# Update Flask configuration for shared hosting
-app.config['UPLOAD_FOLDER'] = os.path.join(BASE_DIR, 'uploads')
-app.config['RESULTS_FOLDER'] = os.path.join(BASE_DIR, 'results')
-# Your existing classes (Node, SuffixTree, SyntenyDetector) - keeping them as is
 class Node:
     """Node class for Suffix Tree implementation"""
     def __init__(self, start: int, end: int):
@@ -125,7 +111,7 @@ class SuffixTree:
 class SyntenyDetector:
     """
     Synteny Block Detection using Suffix Trees
-    Handles large genome files efficiently
+    Handles large genome files efficiently - Memory only version
     """
     
     def __init__(self, min_block_length: int = 50):
@@ -137,24 +123,25 @@ class SyntenyDetector:
         """Add message to log for API response"""
         self.log_messages.append(message)
     
-    def preprocess_fasta(self, file_path: str) -> str:
+    def preprocess_fasta_content(self, file_content: str, filename: str = "genome") -> str:
         """
-        Simple and efficient FASTA preprocessing:
+        Simple and efficient FASTA preprocessing from file content:
         - Remove headers (lines starting with >)
         - Remove all N sequences
         - Keep only valid DNA characters (ATCG)
         """
-        self.log(f"Loading genome from {os.path.basename(file_path)}...")
+        self.log(f"Loading genome from {filename}...")
         
         sequence_parts = []
-        with open(file_path, 'r') as file:
-            for line in file:
-                line = line.strip()
-                if line and not line.startswith('>'):
-                    # Keep only ATCG characters, remove all N's and other characters
-                    clean_line = ''.join(c for c in line.upper() if c in 'ATCG')
-                    if clean_line:
-                        sequence_parts.append(clean_line)
+        lines = file_content.strip().split('\n')
+        
+        for line in lines:
+            line = line.strip()
+            if line and not line.startswith('>'):
+                # Keep only ATCG characters, remove all N's and other characters
+                clean_line = ''.join(c for c in line.upper() if c in 'ATCG')
+                if clean_line:
+                    sequence_parts.append(clean_line)
         
         dna_sequence = ''.join(sequence_parts)
         self.log(f"Loaded genome with {len(dna_sequence):,} bases (headers and N's filtered out)")
@@ -199,15 +186,16 @@ class SyntenyDetector:
         self.log(f"Merged {len(blocks)} blocks into {len(merged)} non-redundant blocks")
         return merged
     
-    def detect_synteny_blocks_chunked(self, genome1_file: str, genome2_file: str) -> List[str]:
+    def detect_synteny_blocks_chunked(self, genome1_content: str, genome2_content: str, 
+                                    genome1_name: str = "genome1", genome2_name: str = "genome2") -> List[str]:
         """
-        Detect synteny blocks by processing genomes in chunks
+        Detect synteny blocks by processing genomes in chunks - memory only version
         """
         self.log("Starting synteny block detection...")
         
         # Preprocess genomes
-        genome1 = self.preprocess_fasta(genome1_file)
-        genome2 = self.preprocess_fasta(genome2_file)
+        genome1 = self.preprocess_fasta_content(genome1_content, genome1_name)
+        genome2 = self.preprocess_fasta_content(genome2_content, genome2_name)
         
         all_synteny_blocks = []
         chunk_num = 0
@@ -281,103 +269,105 @@ class SyntenyDetector:
         
         return analysis
     
-    def write_results_to_file(self, synteny_blocks: List[str], analysis: dict, 
-                            output_file: str, genome1_file: str = "", genome2_file: str = ""):
+    def generate_results_text(self, synteny_blocks: List[str], analysis: dict, 
+                            genome1_name: str = "", genome2_name: str = "") -> str:
         """
-        Write synteny detection results to a comprehensive output file
+        Generate comprehensive results text (instead of writing to file)
         """
-        try:
-            with open(output_file, 'w') as f:
-                # Write header and metadata
-                f.write("=" * 80 + "\n")
-                f.write("SYNTENY BLOCK DETECTION RESULTS\n")
-                f.write("=" * 80 + "\n")
-                f.write(f"Analysis Date: {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-                f.write(f"Minimum Block Length Threshold: {self.min_block_length} bp\n")
-                f.write(f"Chunk Size Used: {self.chunk_size} bp\n")
-                
-                if genome1_file:
-                    f.write(f"Genome 1: {os.path.basename(genome1_file)}\n")
-                if genome2_file:
-                    f.write(f"Genome 2: {os.path.basename(genome2_file)}\n")
-                
-                f.write("\n" + "=" * 80 + "\n")
-                f.write("SUMMARY STATISTICS\n")
-                f.write("=" * 80 + "\n")
-                
-                if synteny_blocks and analysis:
-                    f.write(f"Total synteny blocks detected: {analysis['total_blocks']}\n")
-                    f.write(f"Minimum block length: {analysis['min_length']} bp\n")
-                    f.write(f"Maximum block length: {analysis['max_length']} bp\n")
-                    f.write(f"Average block length: {analysis['avg_length']:.2f} bp\n")
-                    f.write(f"Total conserved sequence: {analysis['total_conserved_sequence']} bp\n")
-                    
-                    # Calculate additional statistics
-                    lengths = [len(block) for block in synteny_blocks]
-                    lengths.sort(reverse=True)
-                    
-                    f.write(f"Median block length: {lengths[len(lengths)//2]:.2f} bp\n")
-                    
-                    # Length distribution
-                    f.write("\nLENGTH DISTRIBUTION:\n")
-                    f.write("-" * 40 + "\n")
-                    ranges = [(50, 100), (100, 500), (500, 1000), (1000, 5000), (5000, float('inf'))]
-                    for min_len, max_len in ranges:
-                        if max_len == float('inf'):
-                            count = sum(1 for l in lengths if l >= min_len)
-                            f.write(f"{min_len}+ bp: {count} blocks\n")
-                        else:
-                            count = sum(1 for l in lengths if min_len <= l < max_len)
-                            f.write(f"{min_len}-{max_len-1} bp: {count} blocks\n")
+        result_lines = []
+        
+        # Write header and metadata
+        result_lines.append("=" * 80)
+        result_lines.append("SYNTENY BLOCK DETECTION RESULTS")
+        result_lines.append("=" * 80)
+        result_lines.append(f"Analysis Date: {time.strftime('%Y-%m-%d %H:%M:%S')}")
+        result_lines.append(f"Minimum Block Length Threshold: {self.min_block_length} bp")
+        result_lines.append(f"Chunk Size Used: {self.chunk_size} bp")
+        
+        if genome1_name:
+            result_lines.append(f"Genome 1: {genome1_name}")
+        if genome2_name:
+            result_lines.append(f"Genome 2: {genome2_name}")
+        
+        result_lines.append("")
+        result_lines.append("=" * 80)
+        result_lines.append("SUMMARY STATISTICS")
+        result_lines.append("=" * 80)
+        
+        if synteny_blocks and analysis:
+            result_lines.append(f"Total synteny blocks detected: {analysis['total_blocks']}")
+            result_lines.append(f"Minimum block length: {analysis['min_length']} bp")
+            result_lines.append(f"Maximum block length: {analysis['max_length']} bp")
+            result_lines.append(f"Average block length: {analysis['avg_length']:.2f} bp")
+            result_lines.append(f"Total conserved sequence: {analysis['total_conserved_sequence']} bp")
+            
+            # Calculate additional statistics
+            lengths = [len(block) for block in synteny_blocks]
+            lengths.sort(reverse=True)
+            
+            result_lines.append(f"Median block length: {lengths[len(lengths)//2]:.2f} bp")
+            
+            # Length distribution
+            result_lines.append("")
+            result_lines.append("LENGTH DISTRIBUTION:")
+            result_lines.append("-" * 40)
+            ranges = [(50, 100), (100, 500), (500, 1000), (1000, 5000), (5000, float('inf'))]
+            for min_len, max_len in ranges:
+                if max_len == float('inf'):
+                    count = sum(1 for l in lengths if l >= min_len)
+                    result_lines.append(f"{min_len}+ bp: {count} blocks")
                 else:
-                    f.write("No synteny blocks detected.\n")
-                    f.write("Possible reasons:\n")
-                    f.write("- Low sequence similarity between genomes\n")
-                    f.write("- Minimum block length threshold too high\n")
-                    f.write("- Large evolutionary distance between species\n")
+                    count = sum(1 for l in lengths if min_len <= l < max_len)
+                    result_lines.append(f"{min_len}-{max_len-1} bp: {count} blocks")
+        else:
+            result_lines.append("No synteny blocks detected.")
+            result_lines.append("Possible reasons:")
+            result_lines.append("- Low sequence similarity between genomes")
+            result_lines.append("- Minimum block length threshold too high")
+            result_lines.append("- Large evolutionary distance between species")
+        
+        # Write detailed block information
+        if synteny_blocks:
+            result_lines.append("")
+            result_lines.append("=" * 80)
+            result_lines.append("DETAILED SYNTENY BLOCKS")
+            result_lines.append("=" * 80)
+            
+            for i, block in enumerate(synteny_blocks, 1):
+                result_lines.append("")
+                result_lines.append(f"Block #{i}:")
+                result_lines.append(f"Length: {len(block)} bp")
+                result_lines.append(f"GC Content: {(block.count('G') + block.count('C')) / len(block) * 100:.2f}%")
                 
-                # Write detailed block information
-                if synteny_blocks:
-                    f.write("\n" + "=" * 80 + "\n")
-                    f.write("DETAILED SYNTENY BLOCKS\n")
-                    f.write("=" * 80 + "\n")
-                    
-                    for i, block in enumerate(synteny_blocks, 1):
-                        f.write(f"\nBlock #{i}:\n")
-                        f.write(f"Length: {len(block)} bp\n")
-                        f.write(f"GC Content: {(block.count('G') + block.count('C')) / len(block) * 100:.2f}%\n")
-                        
-                        # Write sequence in formatted blocks
-                        f.write("Sequence:\n")
-                        for j in range(0, len(block), 80):  # 80 characters per line
-                            line_num = j // 80 + 1
-                            f.write(f"{line_num:4d}: {block[j:j+80]}\n")
-                        
-                        f.write("-" * 80 + "\n")
-                    
-                    # Write FASTA format section
-                    f.write("\n" + "=" * 80 + "\n")
-                    f.write("SYNTENY BLOCKS IN FASTA FORMAT\n")
-                    f.write("=" * 80 + "\n")
-                    
-                    for i, block in enumerate(synteny_blocks, 1):
-                        f.write(f">Synteny_Block_{i} length={len(block)}\n")
-                        # Write sequence in 80-character lines (standard FASTA format)
-                        for j in range(0, len(block), 80):
-                            f.write(f"{block[j:j+80]}\n")
+                # Write sequence in formatted blocks
+                result_lines.append("Sequence:")
+                for j in range(0, len(block), 80):  # 80 characters per line
+                    line_num = j // 80 + 1
+                    result_lines.append(f"{line_num:4d}: {block[j:j+80]}")
+                
+                result_lines.append("-" * 80)
+                
+            # Write FASTA format section
+            result_lines.append("")
+            result_lines.append("=" * 80)
+            result_lines.append("SYNTENY BLOCKS IN FASTA FORMAT")
+            result_lines.append("=" * 80)
             
-            self.log(f"Results successfully written to: {output_file}")
-            
-        except Exception as e:
-            self.log(f"Error writing results to file: {e}")
+            for i, block in enumerate(synteny_blocks, 1):
+                result_lines.append(f">Synteny_Block_{i} length={len(block)}")
+                # Write sequence in 80-character lines (standard FASTA format)
+                for j in range(0, len(block), 80):
+                    result_lines.append(f"{block[j:j+80]}")
+        
+        return "\n".join(result_lines)
 
 # API Routes
 @app.route('/')
 def index():
     """API documentation endpoint"""
     return jsonify({
-        "message": "Synteny Detection API",
-        "version": "1.0",
+        "message": "Synteny Detection API - Memory Only Version",
+        "version": "2.0",
         "endpoints": {
             "/analyze": {
                 "method": "POST",
@@ -387,18 +377,15 @@ def index():
                     "genome2": "FASTA file (multipart/form-data)", 
                     "min_length": "Minimum block length (optional, default: 100)"
                 },
-                "returns": "JSON with analysis results and file download links"
-            },
-            "/download/<filename>": {
-                "method": "GET",
-                "description": "Download generated result files"
+                "returns": "JSON with analysis results including full text report"
             }
-        }
+        },
+        "note": "Files are processed in memory only - no files are saved on server"
     })
 
 @app.route('/analyze', methods=['POST'])
 def analyze_synteny():
-    """Main API endpoint for synteny analysis"""
+    """Main API endpoint for synteny analysis - memory only version"""
     try:
         # Check if files are present in request
         if 'genome1' not in request.files or 'genome2' not in request.files:
@@ -420,17 +407,15 @@ def analyze_synteny():
         # Get minimum length parameter
         min_length = int(request.form.get('min_length', 100))
         
-        # Generate unique session ID for this analysis
-        session_id = str(int(time.time()))
-        session_dir = os.path.join(app.config['UPLOAD_FOLDER'], session_id)
-        os.makedirs(session_dir, exist_ok=True)
-        
-        # Save uploaded files
-        genome1_path = os.path.join(session_dir, secure_filename(genome1_file.filename))
-        genome2_path = os.path.join(session_dir, secure_filename(genome2_file.filename))
-        
-        genome1_file.save(genome1_path)
-        genome2_file.save(genome2_path)
+        # Read file contents directly into memory
+        try:
+            genome1_content = genome1_file.read().decode('utf-8')
+            genome2_content = genome2_file.read().decode('utf-8')
+        except UnicodeDecodeError:
+            return jsonify({
+                "error": "Files must be text-based FASTA files (UTF-8 encoding)",
+                "status": "error"
+            }), 400
         
         # Initialize detector
         detector = SyntenyDetector(min_block_length=min_length)
@@ -439,26 +424,22 @@ def analyze_synteny():
         start_time = time.time()
         
         # Detect synteny blocks
-        synteny_blocks = detector.detect_synteny_blocks_chunked(genome1_path, genome2_path)
+        synteny_blocks = detector.detect_synteny_blocks_chunked(
+            genome1_content, 
+            genome2_content,
+            genome1_file.filename,
+            genome2_file.filename
+        )
         
         # Analyze results
         analysis = detector.analyze_synteny_blocks(synteny_blocks) if synteny_blocks else {"total_blocks": 0}
         
-        # Generate result files
-        results_dir = os.path.join(app.config['RESULTS_FOLDER'], session_id)
-        os.makedirs(results_dir, exist_ok=True)
-        
-        timestamp = time.strftime('%Y%m%d_%H%M%S')
-        results_filename = f"synteny_results_{timestamp}.txt"
-        results_path = os.path.join(results_dir, results_filename)
-        
-        # Write detailed results
-        detector.write_results_to_file(
+        # Generate text report
+        text_report = detector.generate_results_text(
             synteny_blocks, 
-            analysis, 
-            results_path,
-            genome1_path,
-            genome2_path
+            analysis,
+            genome1_file.filename,
+            genome2_file.filename
         )
         
         end_time = time.time()
@@ -467,7 +448,6 @@ def analyze_synteny():
         # Prepare response
         response_data = {
             "status": "success",
-            "session_id": session_id,
             "analysis_time_seconds": round(analysis_time, 2),
             "parameters": {
                 "genome1_filename": genome1_file.filename,
@@ -476,9 +456,7 @@ def analyze_synteny():
             },
             "results": analysis,
             "log_messages": detector.log_messages,
-            "files": {
-                "detailed_results": f"/download/{session_id}/{results_filename}"
-            }
+            "detailed_report": text_report
         }
         
         # Add synteny blocks info if found
@@ -489,11 +467,9 @@ def analyze_synteny():
                     "block_id": i,
                     "length": len(block),
                     "gc_content": round((block.count('G') + block.count('C')) / len(block) * 100, 2),
-                    "sequence_preview": block[:100] + ("..." if len(block) > 100 else "")
+                    "sequence_preview": block[:100] + ("..." if len(block) > 100 else ""),
+                    "full_sequence": block  # Include full sequence in JSON
                 })
-        
-        # Clean up uploaded files after some time (you might want to do this with a background task)
-        # For now, we'll keep them for download purposes
         
         return jsonify(response_data)
         
@@ -504,33 +480,13 @@ def analyze_synteny():
             "message": "An error occurred during analysis"
         }), 500
 
-@app.route('/download/<session_id>/<filename>')
-def download_file(session_id, filename):
-    """Download generated result files"""
-    try:
-        file_path = os.path.join(app.config['RESULTS_FOLDER'], session_id, filename)
-        
-        if not os.path.exists(file_path):
-            return jsonify({
-                "error": "File not found",
-                "status": "error"
-            }), 404
-        
-        return send_file(file_path, as_attachment=True, download_name=filename)
-    
-    except Exception as e:
-        return jsonify({
-            "error": str(e),
-            "status": "error"
-        }), 500
-
 @app.route('/health')
 def health_check():
     """Health check endpoint"""
     return jsonify({
         "status": "healthy",
         "timestamp": time.strftime('%Y-%m-%d %H:%M:%S'),
-        "service": "Synteny Detection API"
+        "service": "Synteny Detection API - Memory Only Version"
     })
 
 # Error handlers
@@ -547,8 +503,4 @@ def internal_error(e):
         "error": "Internal server error",
         "status": "error"
     }), 500
-
-# if __name__ == '__main__':
-#     # For development
-#     app.run( host='0.0.0.0', port=5000)
 
