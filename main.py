@@ -7,9 +7,9 @@ import tempfile
 from typing import List, Tuple, Set, Optional
 import numpy as np
 from io import StringIO
-
+from flask_cors import CORS
 app = Flask(__name__)
-
+CORS(app)
 # Configuration
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 
